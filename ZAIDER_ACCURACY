@@ -1,0 +1,22 @@
+REPORT zaider_accuracy.
+
+INCLUDE:  zaider_accuracy_top,
+          zaider_accuracy_c01,
+          zaider_accuracy_stato01,
+          zaider_accuracy_useri01.
+
+START-OF-SELECTION.
+  lcl_aider_report=>get_data( ).
+  lcl_aider_report=>process_data( ).
+  lcl_aider_report=>display_data( ).
+  IF po_alv IS NOT INITIAL.
+    CALL SCREEN 1001.
+  ENDIF.
+END-OF-SELECTION.
+  IF po_alv IS INITIAL.
+    EXPORT gt_output FROM gt_output TO MEMORY ID 'AIDER_ACC'.
+  ENDIF.
+
+  IF po_email IS NOT INITIAL.
+    lcl_aider_report=>send_mail( ).
+  ENDIF.
