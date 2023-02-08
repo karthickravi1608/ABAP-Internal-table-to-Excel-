@@ -1,0 +1,446 @@
+*&---------------------------------------------------------------------*
+*& Include          /APLXIS/AIDER_ACCURACY_C01
+*&---------------------------------------------------------------------*
+
+CLASS lcl_aider_report DEFINITION.
+  PUBLIC SECTION.
+    CLASS-METHODS:  get_data,
+      process_data,
+      display_data,
+      fill_field_catalog
+        CHANGING ct_fieldcatalog TYPE lvc_t_fcat,
+      send_mail.
+ENDCLASS.
+
+
+CLASS lcl_aider_report IMPLEMENTATION.
+  METHOD get_data.
+    SELECT u_id, fpuid, bedat, recdt, doc_id, first_role, created_date, created_time
+             FROM /aplxis/doc_hdr INTO TABLE @gt_hdr WHERE recdt IN @so_invdt AND status EQ 'P'.
+    IF sy-subrc IS INITIAL.
+      SELECT * FROM /aplxis/aiderfld INTO TABLE @gt_aider
+               FOR ALL ENTRIES IN @gt_hdr WHERE u_id EQ @gt_hdr-u_id.
+      IF sy-subrc IS INITIAL.
+        SORT gt_aider BY u_id.
+      ENDIF.
+      SELECT * FROM /aplxis/file_tr INTO TABLE @gt_file_tr
+              FOR ALL ENTRIES IN @gt_hdr WHERE fpuid EQ @gt_hdr-fpuid.
+      SELECT SINGLE chn_id, chn_typ, map_id FROM /aplxis/sce_chn INTO @DATA(ls_sce_chn)
+              WHERE chn_typ = 'OCR'.
+      SELECT ocr~map_id, ocr~ocr_fld, ocr~aider_field_id,
+          chn~table_name, chn~field_name, fld~field_lbl
+          FROM /aplxis/ocr_map AS ocr INNER JOIN /aplxis/chn_map AS chn
+          ON ocr~map_id EQ chn~map_id AND ocr~ocr_fld EQ chn~chn_fld
+          INNER JOIN /aplxis/xs_fld_l AS fld ON fld~field_id EQ chn~field_name
+          WHERE fld~spras EQ @sy-langu AND chn~map_id EQ @ls_sce_chn-map_id
+          INTO TABLE @gt_text_label.
+      IF sy-subrc IS INITIAL.
+        SORT gt_text_label BY aider_field_id.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD process_data.
+    DATA: lt_dfies            TYPE STANDARD TABLE OF dfies,
+          lv_ocr_fields_count TYPE i,
+          lv_date_1           TYPE aldate,
+          lv_date_2           TYPE aldate,
+          lv_time_1           TYPE altime,
+          lv_time_2           TYPE altime,
+          lv_seconds          TYPE int4,
+          lv_hour_i           TYPE int4,
+          lv_hour             TYPE n LENGTH 2,
+          lv_min              TYPE n LENGTH 2,
+          lv_sec              TYPE n LENGTH 2,
+          lv_zero_count       TYPE i,
+          lv_cent_count       TYPE i,
+          lv_accuracy         TYPE p DECIMALS 2.
+    CONSTANTS: lc_posted_field TYPE c LENGTH 12 VALUE 'POSTED_FIELD',
+               lc_accuracy     TYPE c LENGTH 9 VALUE '_ACCURACY'.
+    FIELD-SYMBOLS: <fs_ocr_fld_value> TYPE any,
+                   <fs_pst_fld_value> TYPE any,
+                   <fs_ocr_acc_value> TYPE any,
+                   <fs_any1>          TYPE any,
+                   <fs_any2>          TYPE any.
+    TRY.
+        IF gt_aider IS NOT INITIAL.
+          CALL FUNCTION 'DDIF_FIELDINFO_GET'
+            EXPORTING
+              tabname        = '/APLXIS/AIDERFLD'
+            TABLES
+              dfies_tab      = lt_dfies
+            EXCEPTIONS
+              not_found      = 1
+              internal_error = 2
+              OTHERS         = 3.
+          LOOP AT gt_aider ASSIGNING FIELD-SYMBOL(<fs_aider>).
+            CLEAR: lv_accuracy, lv_zero_count, lv_cent_count.
+            APPEND INITIAL LINE TO gt_output ASSIGNING FIELD-SYMBOL(<fs_out>).
+            IF <fs_out> IS ASSIGNED.
+              MOVE-CORRESPONDING <fs_aider> TO <fs_out>.
+              IF <fs_aider>-sent_to_ocr IS NOT INITIAL.
+                SPLIT <fs_aider>-sent_to_ocr AT '-' INTO DATA(lv_date) DATA(lv_time).
+                READ TABLE gt_file_tr WITH KEY fpuid = <fs_aider>-fpuid
+                                ASSIGNING FIELD-SYMBOL(<fs_file_tr>).
+                IF sy-subrc IS INITIAL.
+                  CLEAR: lv_date_1, lv_date_2, lv_time_1, lv_time_2,lv_seconds, lv_hour, lv_min.
+                  READ TABLE gt_hdr ASSIGNING FIELD-SYMBOL(<fs_hdr>) WITH KEY u_id = <fs_aider>-u_id.
+                  IF sy-subrc IS INITIAL.
+                    lv_date_1 = <fs_file_tr>-created_date.
+                    lv_date_2 = <fs_file_tr>-ocr_proc_date.
+                    lv_time_1 = <fs_file_tr>-created_time.
+                    lv_time_2 = <fs_file_tr>-ocr_proc_time.
+                  ENDIF.
+                  IF lv_date_1 IS NOT INITIAL AND lv_date_2 IS NOT INITIAL AND
+                        lv_time_1 IS NOT INITIAL AND lv_time_2 IS NOT INITIAL.
+                    TRY.
+                        CALL FUNCTION 'SALP_SM_CALC_TIME_DIFFERENCE'
+                          EXPORTING
+                            date_1  = lv_date_1
+                            time_1  = lv_time_1
+                            date_2  = lv_date_2
+                            time_2  = lv_time_2
+                          IMPORTING
+                            seconds = lv_seconds.
+                      CATCH cx_root.
+                    ENDTRY.
+                    lv_hour = lv_seconds / ( 3600 ).
+                    IF lv_hour IS NOT INITIAL.
+                      lv_min = lv_seconds - ( lv_hour * 60 ).
+                      lv_sec = ( lv_hour * 60 ) + ( lv_min * 60 ).
+                    ELSE.
+                      lv_min = lv_seconds / 60.
+                      lv_sec = ( lv_min * 60 ).
+                    ENDIF.
+                    lv_sec = lv_sec - lv_seconds.
+                    <fs_out>-ocr_proc_time = lv_hour && ':' && lv_min && ':' && lv_sec.
+                  ENDIF.
+                ENDIF.
+              ENDIF.
+
+
+              READ TABLE gt_hdr WITH KEY u_id = <fs_aider>-u_id ASSIGNING <fs_hdr>.
+              IF sy-subrc IS INITIAL.
+                IF <fs_out>-doc_id IS INITIAL.
+                  <fs_out>-doc_id = <fs_hdr>-doc_id.
+                ENDIF.
+                <fs_out>-bedat = <fs_hdr>-bedat.
+                <fs_out>-recdt = <fs_hdr>-recdt.
+                <fs_out>-first_role = <fs_hdr>-first_role.
+                CLEAR: lv_date_1, lv_date_2, lv_time_1, lv_time_2,lv_seconds, lv_hour, lv_min.
+                lv_date_1 = <fs_hdr>-created_date.
+                lv_date_2 = <fs_aider>-bedat.
+                lv_time_1 = <fs_hdr>-created_time.
+                lv_time_2 = <fs_aider>-posted_time.
+                IF lv_date_1 IS NOT INITIAL AND lv_date_2 IS NOT INITIAL
+                        AND lv_time_1 IS NOT INITIAL AND lv_time_2 IS NOT INITIAL.
+                  CALL FUNCTION 'SALP_SM_CALC_TIME_DIFFERENCE'
+                    EXPORTING
+                      date_1  = lv_date_1
+                      time_1  = lv_time_1
+                      date_2  = lv_date_2
+                      time_2  = lv_time_2
+                    IMPORTING
+                      seconds = lv_seconds.
+                  IF lv_seconds LE 3600.
+                    lv_hour = 00.
+                    lv_min = floor( lv_seconds / 60 ).
+                    lv_sec = lv_seconds - ( lv_min * 60 ).
+                  ELSE.
+                    lv_hour = floor( lv_seconds / 3600 ).
+                    lv_min = lv_seconds - ( lv_hour * 60 ).
+                    IF lv_min LT 60.
+                      lv_sec = lv_sec.
+                      lv_min = 00.
+                    ELSE.
+                      lv_min = floor( lv_min / 60 ).
+                      lv_sec = lv_seconds - ( lv_hour * 60 * 60 ) - ( lv_min * 60 ).
+                    ENDIF.
+                  ENDIF.
+                  lv_sec = lv_sec - lv_seconds.
+                  <fs_out>-inv_proc_time = lv_hour && ':' && lv_min && ':' && lv_sec.
+                ENDIF.
+              ENDIF.
+              LOOP AT lt_dfies ASSIGNING FIELD-SYMBOL(<ocr_fld>)
+                              WHERE fieldname CP 'OCR_FIELD*' AND fieldname NP 'OCR_FIELD*_ACCURACY'.
+                ASSIGN COMPONENT <ocr_fld>-fieldname OF STRUCTURE <fs_aider> TO <fs_ocr_fld_value>. "OCR Value
+                IF <fs_ocr_fld_value> IS ASSIGNED.
+                  CONDENSE: <fs_ocr_fld_value>.
+                  DATA(lv_pstd_field) = lc_posted_field && <ocr_fld>-fieldname+9.
+                  ASSIGN COMPONENT lv_pstd_field OF STRUCTURE <fs_aider> TO <fs_pst_fld_value>.     "Posted Value
+                  IF <fs_pst_fld_value> IS ASSIGNED.
+                    CONDENSE: <fs_pst_fld_value>.
+                    DATA(lv_accuracy_field) = <ocr_fld>-fieldname && lc_accuracy.
+                    ASSIGN COMPONENT lv_accuracy_field OF STRUCTURE <fs_out> TO <fs_ocr_acc_value>.  "OCR Accuracy.
+                    IF <fs_ocr_acc_value> IS ASSIGNED AND
+                          ( <fs_pst_fld_value> IS NOT INITIAL OR <fs_ocr_fld_value> IS NOT INITIAL ).
+                      IF <fs_pst_fld_value> NE <fs_ocr_fld_value>.
+                        <fs_ocr_acc_value> = '0.00%'.
+                        lv_zero_count = lv_zero_count + 1.
+                      ELSE.
+                        <fs_ocr_acc_value> = '100.00%'.
+                        lv_cent_count = lv_cent_count + 1.
+                        lv_accuracy = lv_accuracy + 100.
+                      ENDIF.
+                      lv_ocr_fields_count = lv_ocr_fields_count + 1.
+                      ASSIGN COMPONENT <ocr_fld>-fieldname OF STRUCTURE <fs_out> TO <fs_any1>.
+                      IF <fs_any1> IS ASSIGNED.
+                        CONDENSE <fs_any1>.
+                      ENDIF.
+                      ASSIGN COMPONENT lv_pstd_field OF STRUCTURE <fs_out> TO <fs_any2>.
+                      IF <fs_any2> IS ASSIGNED.
+                        CONDENSE <fs_any2>.
+                      ENDIF.
+                    ENDIF.
+                  ENDIF.
+                ENDIF.
+              ENDLOOP.
+              lv_cent_count = lv_zero_count + lv_cent_count.
+              lv_accuracy = lv_accuracy / lv_cent_count.
+              <fs_out>-invoice_accuracy = lv_accuracy && '%'.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+      CATCH cx_root.
+    ENDTRY.
+  ENDMETHOD.
+
+  METHOD display_data.
+    DATA: lo_grid             TYPE REF TO cl_gui_alv_grid,
+          lo_custom_container TYPE REF TO cl_gui_custom_container,
+          ls_layout           TYPE lvc_s_layo.
+
+
+    IF gt_output IS NOT INITIAL.
+      IF lo_custom_container IS INITIAL.
+        CREATE OBJECT lo_custom_container
+          EXPORTING
+            container_name = 'CC_CONTAINER'.
+
+        CREATE OBJECT lo_grid
+          EXPORTING
+            i_parent = lo_custom_container.
+
+        CALL METHOD lcl_aider_report=>fill_field_catalog(
+          CHANGING
+            ct_fieldcatalog = gt_fieldcatalog ).
+        ls_layout-cwidth_opt = 'X'.
+        ls_layout-zebra = 'X'.
+        CALL METHOD lo_grid->set_table_for_first_display
+          EXPORTING
+            i_structure_name = '/APLXIS/S_AIDER_FIELDS'
+            is_layout        = ls_layout
+          CHANGING
+            it_outtab        = gt_output
+            it_fieldcatalog  = gt_fieldcatalog.
+      ENDIF.
+    ELSE.
+      MESSAGE: TEXT-001 TYPE sy-abcde+4(1).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD fill_field_catalog.
+    REFRESH: ct_fieldcatalog.
+    DATA: lt_hdr_flds  TYPE STANDARD TABLE OF dfies,
+          lv_count     TYPE i VALUE 1,
+          lv_color_cnt TYPE i VALUE 1.
+
+    CALL FUNCTION 'DDIF_FIELDINFO_GET'
+      EXPORTING
+        tabname        = '/APLXIS/S_AIDER_FIELDS'
+      TABLES
+        dfies_tab      = gt_aid_flds
+      EXCEPTIONS
+        not_found      = 1
+        internal_error = 2
+        OTHERS         = 3.
+    LOOP AT gt_aid_flds ASSIGNING FIELD-SYMBOL(<fs_dfies>).
+      APPEND INITIAL LINE TO ct_fieldcatalog ASSIGNING FIELD-SYMBOL(<fs_fcat>).
+      IF <fs_fcat> IS ASSIGNED.
+        <fs_fcat>-col_pos = lv_count.
+        <fs_fcat>-fieldname = <fs_dfies>-fieldname.
+        <fs_fcat>-tabname = '/APLXIS/S_AIDER_FIELDS'.
+        <fs_fcat>-colddictxt = 'L'.
+        IF <fs_dfies>-fieldname CP 'OCR_FIELD*'
+                AND <fs_dfies>-fieldname NP 'OCR_FIELD*ACCURACY'.
+          lv_color_cnt = lv_color_cnt + 1.
+          <fs_fcat>-lzero = 'X'.
+          READ TABLE gt_text_label WITH KEY aider_field_id = <fs_dfies>-fieldname
+                        ASSIGNING FIELD-SYMBOL(<fs_text>).
+          IF sy-subrc IS INITIAL AND <fs_text> IS ASSIGNED.
+            <fs_fcat>-scrtext_l = <fs_text>-field_lbl && '(OCR)'.
+          ENDIF.
+          IF ( lv_color_cnt MOD 2 ) EQ 0.
+            <fs_fcat>-emphasize = 'C100'.
+          ELSE.
+            <fs_fcat>-emphasize = 'C700'.
+          ENDIF.
+        ELSEIF <fs_dfies>-fieldname CP 'POSTED_FIELD*'.
+          DATA(lv_num) = <fs_dfies>-fieldname+12.
+          DATA(lv_fld) = 'OCR_FIELD' && lv_num.
+          <fs_fcat>-lzero = 'X'.
+          READ TABLE gt_text_label WITH KEY aider_field_id = lv_fld
+                        ASSIGNING <fs_text>.
+          IF sy-subrc IS INITIAL AND <fs_text> IS ASSIGNED.
+            <fs_fcat>-scrtext_l = <fs_text>-field_lbl && '(POSTED)'.
+          ENDIF.
+          IF ( lv_color_cnt MOD 2 ) EQ 0.
+            <fs_fcat>-emphasize = 'C100'.
+          ELSE.
+            <fs_fcat>-emphasize = 'C700'.
+          ENDIF.
+        ELSEIF <fs_dfies>-fieldname CP 'OCR_FIELD*ACCURACY'.
+          lv_fld = <fs_dfies>-fieldname.
+          REPLACE '_ACCURACY' IN lv_fld WITH ''.
+          <fs_fcat>-lzero = 'X'.
+          READ TABLE gt_text_label WITH KEY aider_field_id = lv_fld
+                        ASSIGNING <fs_text>.
+          IF sy-subrc IS INITIAL AND <fs_text> IS ASSIGNED.
+            <fs_fcat>-scrtext_l = <fs_text>-field_lbl && '(ACCURACY %)'.
+          ENDIF.
+          IF ( lv_color_cnt MOD 2 ) EQ 0.
+            <fs_fcat>-emphasize = 'C100'.
+          ELSE.
+            <fs_fcat>-emphasize = 'C700'.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+      lv_count = lv_count + 1.
+    ENDLOOP.
+  ENDMETHOD.
+  METHOD send_mail.
+    TYPES:  BEGIN OF ty_fin ,
+              line TYPE string ,
+            END OF ty_fin .
+    CONSTANTS:  gc_tab      TYPE c VALUE cl_abap_char_utilities=>horizontal_tab,
+                gc_crlf     TYPE c VALUE cl_abap_char_utilities=>cr_lf.
+    DATA: lv_string       TYPE string,
+          ls_final        TYPE ty_fin,
+          main_text       TYPE bcsy_text,
+          binary_content  TYPE solix_tab,
+          size            TYPE so_obj_len,
+          email           TYPE adr6-smtp_addr,
+          send_request    TYPE REF TO cl_bcs,
+          document        TYPE REF TO cl_document_bcs,
+          recipient       TYPE REF TO if_recipient_bcs,
+          bcs_exception   TYPE REF TO cx_bcs,
+          sent_to_all     TYPE os_boolean,
+          lv_subject      TYPE so_obj_des,
+          body_html       TYPE bcsy_text.
+    FIELD-SYMBOLS: <fs_data> TYPE any.
+
+    LOOP AT gt_aid_flds ASSIGNING FIELD-SYMBOL(<fs_aid_flds>).
+      DATA(lv_tabix) = sy-tabix.
+      READ TABLE gt_fieldcatalog ASSIGNING FIELD-SYMBOL(<fs_fcat>)
+                WITH KEY fieldname = <fs_aid_flds>-fieldname.
+      IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-scrtext_l IS NOT INITIAL.
+        IF lv_tabix EQ 1.
+          lv_string = <fs_fcat>-scrtext_l.
+        ELSE.
+          CONCATENATE lv_string <fs_fcat>-scrtext_l INTO lv_string SEPARATED BY gc_tab.
+        ENDIF.
+      ELSE.
+        IF lv_tabix EQ 1.
+          lv_string = <fs_aid_flds>-scrtext_l.
+        ELSE.
+          IF <fs_aid_flds>-scrtext_l IS INITIAL.
+            CONCATENATE lv_string <fs_aid_flds>-scrtext_s INTO lv_string SEPARATED BY gc_tab.
+          ELSE.
+            CONCATENATE lv_string <fs_aid_flds>-scrtext_l INTO lv_string SEPARATED BY gc_tab.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    CONCATENATE lv_string gc_crlf INTO lv_string.
+
+    LOOP AT gt_output ASSIGNING FIELD-SYMBOL(<fs_out>).
+      LOOP AT gt_aid_flds ASSIGNING <fs_aid_flds>.
+        lv_tabix = sy-tabix.
+        ASSIGN COMPONENT <fs_aid_flds>-fieldname OF STRUCTURE <fs_out> TO <fs_data>.
+        IF <fs_data> IS ASSIGNED.
+          IF lv_tabix EQ 1.
+            CONCATENATE lv_string <fs_data> INTO lv_string.
+          ELSE.
+           CONCATENATE lv_string <fs_data> INTO lv_string SEPARATED BY gc_tab.
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+      CONCATENATE lv_string gc_crlf INTO lv_string.
+    ENDLOOP.
+
+     TRY.
+      send_request = cl_bcs=>create_persistent( ).
+      CONCATENATE 'InSITE: AIDER Accuracy Report' sy-datum INTO lv_subject SEPARATED BY space.
+
+      APPEND '<html>' TO main_text .
+      APPEND '<title>InSITE: AIDER Accuracy Report</title>' TO main_text .
+      APPEND '<body>' TO main_text .
+      APPEND '<p>Dear User,</p>' TO main_text.
+      APPEND '<p>Please find below attached Accuracy Report</p>' TO main_text .
+      APPEND '<br><br><br><br>' TO main_text.
+      APPEND '<p>Note: This is an auto- generated email from background job</p>' TO main_text.
+      APPEND '</body>' TO main_text .
+      APPEND '</html>' TO main_text .
+
+
+      document = cl_document_bcs=>create_document(
+        i_type    = 'HTM'
+        i_text    = main_text
+        i_length  = '12'
+        i_subject = lv_subject ).
+
+      send_request->set_document( document ).
+
+      TRY.
+        cl_bcs_convert=>string_to_solix(
+          EXPORTING
+            iv_string   = lv_string
+            iv_codepage = '4103'        "suitable for MS Excel, leave empty
+            iv_add_bom  = 'X'           "for other doc types
+          IMPORTING
+            et_solix  = binary_content
+            ev_size   = size ).
+      CATCH cx_bcs.
+        MESSAGE e445(so).
+      ENDTRY.
+
+
+      DATA : lv_name TYPE sood-objdes,
+             lt_att_hdr TYPE soli_tab.
+      lv_name = 'AIDER_ACCURACY_REPORT'.
+      CONCATENATE 'Aider Accuracy Report' '.csv' INTO DATA(lv_name1).
+      CONCATENATE '&SO_FILENAME=' lv_name1 INTO DATA(lv_name2).
+      APPEND VALUE #( line = lv_name2 ) TO lt_att_hdr.
+      document->add_attachment(
+        i_attachment_type    = 'CSV'
+        i_attachment_subject = lv_name
+        i_attachment_size    = size
+        i_att_content_hex    = binary_content
+        i_attachment_header  = lt_att_hdr ).
+
+      email = 'karthick.ravi@applexus.com' .
+      recipient = cl_cam_address_bcs=>create_internet_address( email ).
+      send_request->add_recipient( recipient ).
+
+      CALL METHOD send_request->set_status_attributes
+        EXPORTING
+          i_requested_status = 'E'.
+
+      sent_to_all = send_request->send( i_with_error_screen = 'X' ).
+      COMMIT WORK.
+
+      IF sent_to_all IS INITIAL.
+        MESSAGE i500(sbcoms) WITH 'karthick.ravi@applexus.com'.
+      ELSE.
+        MESSAGE s022(so).
+      ENDIF.
+
+*   ------------ exception handling ----------------------------------
+*   replace this rudimentary exception handling with your own one !!!
+    CATCH cx_bcs INTO bcs_exception.
+      MESSAGE i865(so) WITH bcs_exception->error_type.
+    ENDTRY.
+
+
+  ENDMETHOD.
+ENDCLASS.
